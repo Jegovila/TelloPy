@@ -4,6 +4,7 @@ import struct
 import sys
 import threading
 import time
+import os
 
 from . import crc
 from . import logger
@@ -14,6 +15,8 @@ from . import video_stream
 from . utils import *
 from . protocol import *
 from . import dispatcher
+
+log = logger.Logger('Tello')
 
 
 class VideoFrame(object):
@@ -71,7 +74,9 @@ class Tello(object):
     EVENT_WIFI = event.Event('wifi')
     EVENT_LIGHT = event.Event('light')
     EVENT_FLIGHT_DATA = event.Event('flight_data')
-    EVENT_LOG = event.Event('log')
+    EVENT_LOG_DATA = event.Event('log_data')
+    EVENT_LOG_RAWDATA = event.Event('log_rawdata')
+    EVENT_LOG_CONFIG = event.Event('log_config')
     EVENT_TIME = event.Event('time')
 
     # data = (payload_bytes, consec_incr_seq_id, frame_secs)
@@ -125,6 +130,8 @@ class Tello(object):
         self.video_encoder_rate = VIDRATE_AUTO
         self.video_req_sps_hz = 4.0
         self.video_stream = None
+        self.log_data_file = None
+        self.log_data = LogData(log)
 
         # Create a UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -406,6 +413,16 @@ class Tello(object):
                        byte_to_hexstring(pkt.get_buffer()))
         return self.send_packet(pkt)
 
+    def __send_ack_log(self, id):
+        pkt = Packet(LOG_MSG, 0x50)
+        pkt.add_byte(0x00)
+        b0, b1 = le16(id)
+        pkt.add_byte(b0)
+        pkt.add_byte(b1)
+        pkt.fixup()
+        return self.send_packet(pkt)
+
+
     def send_packet(self, pkt):
         """Send_packet is used to send a command packet to the drone."""
         try:
@@ -445,10 +462,29 @@ class Tello(object):
             return False
 
         pkt = Packet(data)
-        cmd = int16(data[5], data[6])
+        cmd = uint16(data[5], data[6])
         if cmd == LOG_MSG:
-            self.log.debug("recv: log: %s" % byte_to_hexstring(data[9:]))
-            self.__publish(event=self.EVENT_LOG, data=data[9:])
+            id = uint16(data[9], data[10])
+            log.info("recv: log_header: id=%04x, '%s'" % (id, str(data[28:54])))
+            log.debug("recv: log_header: %s" % byte_to_hexstring(data[9:]))
+            self.__send_ack_log(id)
+            self.__publish(event=self.EVENT_LOG_HEADER, data=data[9:])
+            if self.log_data_file and not self.log_data_header_recorded:
+                self.log_data_file.write(data[12:-2])
+                self.log_data_header_recorded = True
+        elif cmd == LOG_DATA_MSG:
+            log.debug("recv: log_data: length=%d, %s" % (len(data[9:]), byte_to_hexstring(data[9:])))
+            self.__publish(event=self.EVENT_LOG_RAWDATA, data=data[9:])
+            try:
+                self.log_data.update(data[10:])
+                if self.log_data_file:
+                    self.log_data_file.write(data[10:-2])
+            except Exception as ex:
+                log.error('%s' % str(ex))
+            self.__publish(event=self.EVENT_LOG_DATA, data=self.log_data)
+        elif cmd == LOG_CONFIG_MSG:
+            log.debug("recv: log_config: length=%d, %s" % (len(data[9:]), byte_to_hexstring(data[9:])))
+            self.__publish(event=self.EVENT_LOG_CONFIG, data=data[9:])
         elif cmd == WIFI_MSG:
             self.log.debug("recv: wifi: %s" % byte_to_hexstring(data[9:]))
             self.__publish(event=self.EVENT_WIFI, data=data[9:])
