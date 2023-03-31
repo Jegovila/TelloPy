@@ -11,6 +11,8 @@ def byte(c):
 def le16(val):
     return (val & 0xff), ((val >> 8) & 0xff)
 
+def uint16(val0, val1):
+    return (val0 & 0xff) | ((val1 & 0xff) << 8)
 
 def int16(val0, val1):
     """Assume little endian."""
